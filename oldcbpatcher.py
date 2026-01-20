@@ -28,12 +28,12 @@ OLDCB_POST_FUNCTION = SignatureBuilder() \
 # because failure here leads to a panic (POST 0xA3)
 OLDCB_SMCHEADER_PATTERN = SignatureBuilder() \
     .pattern([
-        0x57, 0xeb, 0x05, 0x3e, # rlwinm     r11,r31,0x0,0x14,0x1f
-        0x2b, 0x0b, 0x00, 0x00, # cmplwi     cr6,r11,0x0
-        0x40, 0x9a, 0x00, 0x20, # bne        cr6,LAB_00006ac0 <-- nop
+        0x57, 0xeb, 0x05, 0x3e,     # rlwinm     r11,r31,0x0,0x14,0x1f
+        0x2b, 0x0b, 0x00, 0x00,     # cmplwi     cr6,r11,0x0
+        0x40, 0x9a, 0x00, 0x20,     # bne        cr6,LAB_00006ac0 <-- nop
         0x2b, WILDCARD, 0x30, 0x00, # cmplwi     cr6,r30,0x3000   <-- nop
-        0x40, 0x9a, 0x00, 0x18, # bne        cr6,LAB_00006ac0 <-- nop
-        0x38, 0x80, 0x30, 0x00, # li         r4,0x3000
+        0x40, 0x9a, 0x00, 0x18,     # bne        cr6,LAB_00006ac0 <-- nop
+        0x38, 0x80, 0x30, 0x00,     # li         r4,0x3000
     ]) \
     .build()
 
@@ -42,6 +42,22 @@ def _patch_smc_panic_a3_case(cbb: bytes, smcheader_check_addr: int) -> bytes:
     cbb, base = assemble_nop(cbb, base)
     cbb, base = assemble_nop(cbb, base)
     cbb, base = assemble_nop(cbb, base)
+    return cbb
+
+# the SMC header check on 13121 is changed because the SMC image is now 0x3800 bytes
+OLDCB_SMCHEADER_13121_PATTERN = SignatureBuilder() \
+    .pattern([
+        0x57, 0xeb, 0x05, 0x7e, # +0x00 rlwinm     r11,r31,0x0,0x15,0x1f
+        0x2b, 0x0b, 0x00, 0x00, # +0x04 cmplwi     cr6,r11,0x0
+        0x40, 0x9a, 0x00, 0x28, # +0x08 bne        cr6,LAB_000052b0
+        0x2b, 0x1e, 0x30, 0x00, # +0x0C cmplwi     cr6,r30,0x3000
+        0x41, 0x9a, 0x00, 0x0c, # +0x10 beq        cr6,LAB_0000529c
+        0x2b, 0x1e, 0x38, 0x00, # +0x14 cmplwi     cr6,r30,0x3800
+    ]) \
+    .build()
+
+def _patch_smc_panic_a3_case_13121(cbb: bytes, smcheader_check_addr: int) -> bytes:
+    cbb, _ = assemble_branch(cbb, smcheader_check_addr + 4, smcheader_check_addr + 0x1C)
     return cbb
 
 OLDCB_SMCSUM_PATTERN = SignatureBuilder() \
@@ -249,6 +265,15 @@ def oldcb_try_patch(cbb: bytes, patchparams: dict) -> None | bytes:
 
     resolved_sigs = bulk_find(resolver_params, cbb)
 
+    if resolved_sigs['smcheader_address'] is None:
+        # kind of a hack, but 13121 requires it
+        print("smc header check not found, might be a corona bootloader...")
+        next_resolve_pass = bulk_find({'smcheader_13121_address': OLDCB_SMCHEADER_13121_PATTERN}, cbb)
+        if next_resolve_pass['smcheader_13121_address'] is not None:
+            print("definitely is a corona bootloader!")
+            del resolved_sigs['smcheader_address']
+            resolved_sigs['smcheader_13121_address'] = next_resolve_pass['smcheader_13121_address']
+
     any_none = False
     for name, offset in resolved_sigs.items():
         if offset is not None:
@@ -277,7 +302,11 @@ def oldcb_try_patch(cbb: bytes, patchparams: dict) -> None | bytes:
 
         if patchparams['disable_default'] is False:
             cbb = _patch_cb_ldv_check(cbb, resolved_sigs['cb_ldv_address'])
-            cbb = _patch_smc_panic_a3_case(cbb, resolved_sigs['smcheader_address'])
+
+            if 'smcheader_address' in resolved_sigs:
+                cbb = _patch_smc_panic_a3_case(cbb, resolved_sigs['smcheader_address'])
+            elif 'smcheader_13121_address' in resolved_sigs:
+                cbb = _patch_smc_panic_a3_case_13121(cbb, resolved_sigs['smcheader_13121_address'])
 
     if patchparams['vfuse']:
         cbb = vfuses_patch_li_600(cbb, resolved_sigs['li_600_address'])
